@@ -409,21 +409,49 @@ class Ercf:
             # bw compatibilty for old klipper versions
             stepper.set_step_dist(new_step_dist)
 
-    cmd_ERCF_GET_SELECTOR_POS_help = "Report the selector motor position"
+    # Without SENSORLESS, estimate the current selector cart position by turning on the 
+    # motor, moving backward to the endstop, and reporting the distance traveled.
+    #
+    # With SENSORLESS, the selector starts somewhere between the origin and the filament
+    # block being probed. A piece of filament is inserted in the block (but NOT through
+    # the selector cart - the gate key is needed to open the block). In this scenario, the
+    # selector is homed normally and we then measure the distance to the filament, using
+    # it as a second virtual endstop. The required OFFSET represents the distance between
+    # the right side of the selector cart (which stops the motion) and the actual filament
+    # entry point within the selector cart. Geometrically this is 5mm, but because the 
+    # selector pushes the filament to the right side of the channel and because the selector
+    # cart has some flex, 4.0mm seems to be a better default.
+
+    cmd_ERCF_GET_SELECTOR_POS_help = "Report the selector position for a filament block"
     def cmd_ERCF_GET_SELECTOR_POS(self, gcmd):
+
         ref_pos = gcmd.get_float('REF', 0.)
+        
+        def command_string(reverse=True):
+            return "MANUAL_STEPPER STEPPER=selector_stepper SPEED=40 " \
+                + "STOP_ON_ENDSTOP=1 MOVE=" + ("-" if reverse else "") \
+                + str(ref_pos)
+                         
+        sensorless = gcmd.get_int('SENSORLESS', default=0, minval=0, maxval=1)
+        sensorless_offset = gcmd.get_float('OFFSET', default=4.0, minval=0.0)
+        
         self.selector_stepper.do_set_position(0.)
         init_position = self.selector_stepper.steppers[0].get_mcu_position()
-        self.command_string = (
-                        "MANUAL_STEPPER STEPPER=selector_stepper SPEED=50"
-                        " MOVE=-" + str(ref_pos) + " STOP_ON_ENDSTOP=1")
-        self.gcode.run_script_from_command(self.command_string)
+        self.gcode.run_script_from_command(command_string())
+        zero_position = self.selector_stepper.steppers[0].get_mcu_position()
+        step_distance = self.selector_stepper.steppers[0].get_step_dist()
+        
+        if not sensorless:
+            distance_traveled = abs(zero_position - init_position) * step_distance
+            self.gcode.respond_info("Selector position = %.1f " %(distance_traveled))
+            return
 
-        current_position = self.selector_stepper.steppers[0].get_mcu_position()
-        traveled_position = abs(current_position - init_position) \
-                * self.selector_stepper.steppers[0].get_step_dist()
-        self.gcode.respond_info("Selector position = %.1f "
-                                %(traveled_position))
+        self.selector_stepper.do_set_position(0.)
+        self.gcode.run_script_from_command(command_string(reverse=False))
+        stop_position = self.selector_stepper.steppers[0].get_mcu_position()
+        distance_traveled = abs(zero_position - stop_position) * step_distance
+        self.gcode.respond_info("Selector position = %.2f " % 
+            (distance_traveled + sensorless_offset))
 
     cmd_ERCF_MOVE_SELECTOR_help = "Move the ERCF selector"
     def cmd_ERCF_MOVE_SELECTOR(self, gcmd):
